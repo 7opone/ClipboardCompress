@@ -60,6 +60,7 @@ import argparse, datetime as dt, io, os, sys, struct, tempfile, time, ctypes
 from ctypes import wintypes
 from PIL import ImageGrab, Image
 import win32clipboard as wcb, win32con
+import win32gui, win32process
 
 # ---------- Windows 内存 API ----------
 kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
@@ -67,7 +68,14 @@ GMEM_MOVEABLE = 0x0002
 GlobalAlloc = kernel32.GlobalAlloc; GlobalAlloc.argtypes=[wintypes.UINT, ctypes.c_size_t]; GlobalAlloc.restype=wintypes.HGLOBAL
 GlobalLock  = kernel32.GlobalLock;  GlobalLock.argtypes=[wintypes.HGLOBAL]; GlobalLock.restype=ctypes.c_void_p
 GlobalUnlock= kernel32.GlobalUnlock;GlobalUnlock.argtypes=[wintypes.HGLOBAL];GlobalUnlock.restype=wintypes.BOOL
-RtlMoveMemory = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t)(("RtlMoveMemory", ctypes.WinDLL("kernel32")))
+RtlMoveMemory = ctypes.CFUNCTYPE(None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t) (("RtlMoveMemory", ctypes.WinDLL("kernel32")))
+
+# ---------- 进程查询 API ----------
+PROCESS_QUERY_INFORMATION = 0x0400
+PROCESS_VM_READ = 0x0010
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+OpenProcess = kernel32.OpenProcess; OpenProcess.argtypes=[wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]; OpenProcess.restype=wintypes.HANDLE
+CloseHandle = kernel32.CloseHandle; CloseHandle.argtypes=[wintypes.HANDLE]; CloseHandle.restype=wintypes.BOOL
 
 # ---------- 默认配置 ----------
 POLL_INTERVAL = 0.4
@@ -100,6 +108,45 @@ def get_clipboard_seq():
 def get_png_format_id():
     try: return wcb.RegisterClipboardFormat("PNG")
     except Exception: return None
+
+# ---- 兼容检测：前台进程是否为表格类应用、剪贴板是否含文本/HTML/RTF ----
+def get_foreground_process_name():
+    try:
+        hwnd = win32gui.GetForegroundWindow()
+        if not hwnd: return ""
+        _, pid = win32process.GetWindowThreadProcessId(hwnd)
+        hproc = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not hproc: return ""
+        try:
+            path = win32process.GetModuleFileNameEx(hproc, 0)
+            return os.path.basename(path).lower()
+        except Exception:
+            return ""
+        finally:
+            try: CloseHandle(hproc)
+            except Exception: pass
+    except Exception:
+        return ""
+
+def is_spreadsheet_foreground():
+    name = get_foreground_process_name()
+    return name in ("excel.exe", "et.exe")
+
+def clipboard_has_textual_data():
+    if not open_clipboard_with_retry(): return False
+    try:
+        fmt = 0
+        html_id = wcb.RegisterClipboardFormat("HTML Format")
+        rtf_id  = wcb.RegisterClipboardFormat("Rich Text Format")
+        csv_id  = wcb.RegisterClipboardFormat("CSV")
+        while True:
+            fmt = wcb.EnumClipboardFormats(fmt)
+            if fmt == 0: break
+            if fmt in (win32con.CF_TEXT, win32con.CF_OEMTEXT, win32con.CF_UNICODETEXT) or fmt in (html_id, rtf_id, csv_id):
+                return True
+        return False
+    finally:
+        close_clipboard_safely()
 
 def grab_image_from_clipboard():
     try:
@@ -213,6 +260,12 @@ def main():
         if seq == last_seq: continue
         last_seq = seq
         if time.time() < ignore_until: continue
+
+        # 若前台是 Excel/WPS 或剪贴板包含文本/HTML/RTF/CSV，跳过处理，避免影响表格复制粘贴
+        if is_spreadsheet_foreground() or clipboard_has_textual_data():
+            log("⏭️ 检测到表格应用或文本性数据，跳过本次处理")
+            ignore_until = time.time() + 0.3
+            continue
 
         img, source = grab_image_from_clipboard()
         if not img: continue
