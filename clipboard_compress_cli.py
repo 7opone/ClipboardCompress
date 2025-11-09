@@ -130,7 +130,7 @@ def get_foreground_process_name():
 
 def is_spreadsheet_foreground():
     name = get_foreground_process_name()
-    return name in ("excel.exe", "et.exe")
+    return name in ("excel.exe", "et.exe", "wpp.exe", "VISIO.EXE", "POWERPNT.EXE", "TencentDocs.exe", "draw.io.exe")
 
 def clipboard_has_textual_data():
     if not open_clipboard_with_retry(): return False
@@ -289,3 +289,4 @@ if __name__ == "__main__":
         main()
     except KeyboardInterrupt:
         log("已退出"); sys.exit(0)
+
